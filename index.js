@@ -8,170 +8,142 @@ const P = require("pino");
 const http = require("http");
 const Groq = require("groq-sdk");
 
-// تنظیمات
 const PORT = process.env.PORT || 3000;
-const PHONE_NUMBER = (process.env.OWNER_PHONE || "93745872028").replace(/[^0-9]/g, "");
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const OWNER_NAME = process.env.OWNER_NAME || "User";
+const PHONE_NUMBER = "93745872028";
+const GROQ_API_KEY = "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"; // 👈 کلید API خودت رو بذار
 
-if (!GROQ_API_KEY) {
-  console.error("GROQ_API_KEY not set");
-  process.exit(1);
-}
-
+// راه‌اندازی Groq
 const groq = new Groq({ apiKey: GROQ_API_KEY });
-const conversationHistory = new Map();
-const userLastMessage = new Map();
+
+// تاریخچه مکالمه (اختیاری - برای حافظه کوتاه‌مدت)
+const conversations = new Map();
 
 http.createServer((req, res) => {
   res.writeHead(200);
-  res.end("Bot Running");
-}).listen(PORT, () => {
-  console.log("Server on port " + PORT);
-});
-
-async function getAIResponse(userMessage, userName, userId) {
-  if (!conversationHistory.has(userId)) {
-    conversationHistory.set(userId, []);
-  }
-
-  const history = conversationHistory.get(userId);
-  history.push({ role: "user", content: userName + ": " + userMessage });
-  
-  if (history.length > 15) {
-    history.splice(0, history.length - 15);
-  }
-
-  try {
-    const completion = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
-      messages: [
-        {
-          role: "system",
-          content: "شما دستیار هوشمند " + OWNER_NAME + " هستید. به فارسی صحبت کنید، صمیمی و کوتاه پاسخ دهید. بگویید صاحب اصلی در دسترس نیست و شما کمک می‌کنید. ایموجی استفاده کنید."
-        },
-        ...history.slice(-10)
-      ],
-      temperature: 0.7,
-      max_tokens: 500
-    });
-
-    const aiResponse = completion.choices[0]?.message?.content || "ببخشید، الان نمیتونم جواب بدم 🙏";
-    history.push({ role: "assistant", content: aiResponse });
-    return aiResponse;
-  } catch (error) {
-    console.error("Groq Error:", error.message);
-    return "مشکلی پیش اومد، لطفاً دوباره تلاش کنید ⚠️";
-  }
-}
-
-function isSpam(userId) {
-  const now = Date.now();
-  const last = userLastMessage.get(userId) || 0;
-  if (now - last < 2000) return true;
-  userLastMessage.set(userId, now);
-  return false;
-}
+  res.end("WhatsApp Bot Running");
+}).listen(PORT);
 
 async function startBot() {
-  console.log("Starting bot...");
-  
   const { state, saveCreds } = await useMultiFileAuthState("auth_info");
 
   const sock = makeWASocket({
     auth: state,
     logger: P({ level: "silent" }),
-    printQRInTerminal: false,
-    browser: ["Ubuntu", "Chrome", "20.0.0"],
-    markOnlineOnConnect: true
+    printQRInTerminal: false
   });
 
   sock.ev.on("creds.update", saveCreds);
 
-  sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect } = update;
-
+  sock.ev.on("connection.update", async ({ connection, lastDisconnect }) => {
     if (connection === "connecting") {
-      console.log("Connecting...");
+      console.log("🔄 Connecting...");
     }
 
     if (connection === "open") {
-      console.log("Bot Connected!");
+      console.log("✅ WhatsApp Connected");
     }
 
     if (connection === "close") {
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
       console.log("Connection closed");
-      
-      if (statusCode !== DisconnectReason.loggedOut) {
-        setTimeout(() => startBot(), 5000);
-      } else {
-        console.log("Logged out, delete auth_info folder");
+
+      const shouldReconnect =
+        lastDisconnect?.error?.output?.statusCode !==
+        DisconnectReason.loggedOut;
+
+      if (shouldReconnect) {
+        setTimeout(startBot, 5000);
       }
     }
   });
 
   if (!state.creds.registered) {
-    console.log("Generating pairing code...");
-    await new Promise(resolve => setTimeout(resolve, 4000));
-    
     try {
+      await new Promise(resolve => setTimeout(resolve, 5000));
       const code = await sock.requestPairingCode(PHONE_NUMBER);
-      console.log("=================================");
-      console.log("CODE: " + code);
-      console.log("=================================");
+
+      console.log("===============================");
+      console.log("PAIRING CODE:");
+      console.log(code);
+      console.log("===============================");
     } catch (err) {
-      console.error("Error:", err.message);
+      console.log(err);
     }
   }
 
-  sock.ev.on("messages.upsert", async ({ messages, type }) => {
-    if (type !== "notify") return;
-    
+  // پاسخ خودکار با Groq AI
+  sock.ev.on("messages.upsert", async ({ messages }) => {
     const msg = messages[0];
+
     if (!msg.message || msg.key.fromMe) return;
-    if (msg.key.remoteJid === "status@broadcast") return;
 
-    const jid = msg.key.remoteJid;
-    const userId = jid.split("@")[0];
+    const text =
+      msg.message.conversation ||
+      msg.message.extendedTextMessage?.text ||
+      "";
 
-    if (isSpam(userId)) return;
+    if (!text) return; // اگه پیام خالی بود، کاری نکن
 
-    let text = msg.message.conversation || 
-               msg.message.extendedTextMessage?.text || 
-               msg.message.imageMessage?.caption || "";
-
-    if (!text || text.trim().length === 0) return;
-
-    const userName = msg.pushName || userId;
-    console.log("Message from " + userName + ": " + text.substring(0, 50));
+    const userId = msg.key.remoteJid;
+    
+    // نشون دادن "در حال تایپ..."
+    await sock.sendPresenceUpdate("composing", userId);
 
     try {
-      await sock.sendPresenceUpdate("composing", jid);
-      const response = await getAIResponse(text, userName, userId);
-      await sock.sendMessage(jid, { text: response });
-      await sock.sendPresenceUpdate("available", jid);
-    } catch (error) {
-      console.error("Send Error:", error.message);
-      try {
-        await sock.sendMessage(jid, { text: "ببخشید مشکلی پیش اومد 🙏" });
-      } catch (e) {
-        console.error(e.message);
+      // دریافت یا ایجاد تاریخچه برای این کاربر
+      if (!conversations.has(userId)) {
+        conversations.set(userId, []);
       }
+      
+      const history = conversations.get(userId);
+      
+      // اضافه کردن پیام کاربر به تاریخچه
+      history.push({
+        role: "user",
+        content: text
+      });
+
+      // محدود کردن تاریخچه به 10 پیام آخر
+      if (history.length > 10) {
+        history.splice(0, history.length - 10);
+      }
+
+      // درخواست به Groq
+      const completion = await groq.chat.completions.create({
+        messages: [
+          {
+            role: "system",
+            content: "تو یک دستیار مفید، دوستانه و فارسی‌زبان هستی. پاسخ‌ها رو مختصر، مفید و به زبان فارسی بده. از ایموجی‌های مناسب استفاده کن."
+          },
+          ...history
+        ],
+        model: "llama-3.3-70b-versatile", // یا mixtral-8x7b-32768
+        temperature: 0.7,
+        max_tokens: 1000,
+      });
+
+      const aiResponse = completion.choices[0]?.message?.content || "ببخشید، نتونستم جواب بدم 🤔";
+
+      // ذخیره پاسخ در تاریخچه
+      history.push({
+        role: "assistant",
+        content: aiResponse
+      });
+
+      // ارسال پاسخ
+      await sock.sendMessage(userId, {
+        text: aiResponse
+      });
+
+    } catch (error) {
+      console.error("❌ خطا در Groq:", error);
+      await sock.sendMessage(userId, {
+        text: "⚠️ مشکلی پیش اومد. لطفاً دوباره تلاش کن."
+      });
+    } finally {
+      // توقف "در حال تایپ..."
+      await sock.sendPresenceUpdate("paused", userId);
     }
   });
 }
 
-setInterval(() => {
-  conversationHistory.clear();
-  userLastMessage.clear();
-}, 1800000);
-
-console.log("Bot Starting...");
-console.log("Owner: " + OWNER_NAME);
-console.log("Phone: " + PHONE_NUMBER);
-
-startBot().catch(err => {
-  console.error("Fatal Error:", err.message);
-  process.exit(1);
-});
+startBot();
