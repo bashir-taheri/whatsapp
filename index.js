@@ -6,16 +6,15 @@ const {
 
 const P = require("pino");
 const http = require("http");
-const Groq = require("groq-sdk");
 
 const PORT = process.env.PORT || 3000;
 const PHONE_NUMBER = "93745872028";
-const GROQ_API_KEY = "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"; // 👈 کلید API خودت رو بذار
 
-// راه‌اندازی Groq
-const groq = new Groq({ apiKey: GROQ_API_KEY });
+// ============ GROQ AI CONFIGURATION ============
+const GROQ_API_KEY = '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';
+const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
-// تاریخچه مکالمه (اختیاری - برای حافظه کوتاه‌مدت)
+// تاریخچه مکالمه
 const conversations = new Map();
 
 http.createServer((req, res) => {
@@ -44,8 +43,6 @@ async function startBot() {
     }
 
     if (connection === "close") {
-      console.log("Connection closed");
-
       const shouldReconnect =
         lastDisconnect?.error?.output?.statusCode !==
         DisconnectReason.loggedOut;
@@ -70,10 +67,41 @@ async function startBot() {
     }
   }
 
-  // پاسخ خودکار با Groq AI
+  // تابع درخواست به Groq
+  async function askGroq(userMessage, history = []) {
+    const messages = [
+      {
+        role: "system",
+        content: "تو یک دستیار مفید، دوستانه و فارسی‌زبان هستی. پاسخ‌ها رو مختصر، مفید و به زبان فارسی بده. از ایموجی‌های مناسب استفاده کن."
+      },
+      ...history,
+      {
+        role: "user",
+        content: userMessage
+      }
+    ];
+
+    const response = await fetch(GROQ_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${GROQ_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: "llama-3.1-8b-instant",
+        messages: messages,
+        temperature: 0.7,
+        max_tokens: 1000
+      })
+    });
+
+    const data = await response.json();
+    return data.choices[0]?.message?.content || "ببخشید، نتونستم جواب بدم 🤔";
+  }
+
+  // پاسخ با Groq
   sock.ev.on("messages.upsert", async ({ messages }) => {
     const msg = messages[0];
-
     if (!msg.message || msg.key.fromMe) return;
 
     const text =
@@ -81,53 +109,30 @@ async function startBot() {
       msg.message.extendedTextMessage?.text ||
       "";
 
-    if (!text) return; // اگه پیام خالی بود، کاری نکن
+    if (!text) return;
 
     const userId = msg.key.remoteJid;
     
-    // نشون دادن "در حال تایپ..."
     await sock.sendPresenceUpdate("composing", userId);
 
     try {
-      // دریافت یا ایجاد تاریخچه برای این کاربر
       if (!conversations.has(userId)) {
         conversations.set(userId, []);
       }
       
       const history = conversations.get(userId);
-      
-      // اضافه کردن پیام کاربر به تاریخچه
-      history.push({
-        role: "user",
-        content: text
-      });
+
+      // گرفتن پاسخ از Groq
+      const aiResponse = await askGroq(text, history);
+
+      // ذخیره در تاریخچه
+      history.push({ role: "user", content: text });
+      history.push({ role: "assistant", content: aiResponse });
 
       // محدود کردن تاریخچه به 10 پیام آخر
-      if (history.length > 10) {
-        history.splice(0, history.length - 10);
+      if (history.length > 20) {
+        history.splice(0, history.length - 20);
       }
-
-      // درخواست به Groq
-      const completion = await groq.chat.completions.create({
-        messages: [
-          {
-            role: "system",
-            content: "تو یک دستیار مفید، دوستانه و فارسی‌زبان هستی. پاسخ‌ها رو مختصر، مفید و به زبان فارسی بده. از ایموجی‌های مناسب استفاده کن."
-          },
-          ...history
-        ],
-        model: "llama-3.3-70b-versatile", // یا mixtral-8x7b-32768
-        temperature: 0.7,
-        max_tokens: 1000,
-      });
-
-      const aiResponse = completion.choices[0]?.message?.content || "ببخشید، نتونستم جواب بدم 🤔";
-
-      // ذخیره پاسخ در تاریخچه
-      history.push({
-        role: "assistant",
-        content: aiResponse
-      });
 
       // ارسال پاسخ
       await sock.sendMessage(userId, {
@@ -135,12 +140,11 @@ async function startBot() {
       });
 
     } catch (error) {
-      console.error("❌ خطا در Groq:", error);
+      console.error("❌ خطا:", error);
       await sock.sendMessage(userId, {
         text: "⚠️ مشکلی پیش اومد. لطفاً دوباره تلاش کن."
       });
     } finally {
-      // توقف "در حال تایپ..."
       await sock.sendPresenceUpdate("paused", userId);
     }
   });
