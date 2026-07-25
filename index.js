@@ -3,109 +3,196 @@ const {
   useMultiFileAuthState,
   DisconnectReason
 } = require("@whiskeysockets/baileys");
-const Groq = require('groq-sdk');
+
 const P = require("pino");
 const http = require("http");
+const Groq = require("groq-sdk");
 
-// ==================== تنظیمات ====================
+// ⚙️ تنظیمات
 const PORT = process.env.PORT || 3000;
-const PHONE_NUMBER = "93745872028";
-const GROQ_API_KEY = "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";
+const PHONE_NUMBER = "93745872028"; // شماره شما بدون +
+const GROQ_API_KEY = "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"; // 🔑 کلید API خود را وارد کنید
+const YOUR_NAME = "بشیر";
+// 🧠 تنظیم Groq AI
+const groq = new Groq({ apiKey: GROQ_API_KEY });
 
-console.log("🚀 Starting WhatsApp Bot...");
-console.log("📱 Phone:", PHONE_NUMBER);
-console.log("🔑 API Key:", GROQ_API_KEY ? "✅ Set" : "❌ Not Set");
+// 📝 حافظه موقت مکالمات (اختیاری - برای context)
+const conversationHistory = new Map();
 
-// ==================== تست Groq ====================
-async function testGroq() {
-  console.log("🔄 Testing Groq connection...");
+// 🌐 سرور Keep-Alive
+http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end("WhatsApp AI Bot Running 🤖");
+}).listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
+});
+
+// 🧠 تابع دریافت پاسخ از Groq
+async function getAIResponse(userMessage, userId) {
+  // ذخیره تاریخچه کاربر
+  if (!conversationHistory.has(userId)) {
+    conversationHistory.set(userId, []);
+  }
+  
+  const history = conversationHistory.get(userId);
+  
+  // اضافه کردن پیام کاربر به تاریخچه
+  history.push({ role: "user", content: userMessage });
+  
+  // محدود کردن تاریخچه به 20 پیام آخر
+  if (history.length > 20) {
+    history.splice(0, history.length - 20);
+  }
+
   try {
-    const test = await groq.chat.completions.create({
-      messages: [{ role: "user", content: "سلام" }],
-      model: "mixtral-8x7b-32768",
-      max_tokens: 10,
+    const completion = await groq.chat.completions.create({
+      model: "mixtral-8x7b-32768", // یا "llama-3.3-70b-versatile"
+      messages: [
+        {
+          role: "system",
+          content: `شما یک دستیار شخصی به نام ${YOUR_NAME} هستید.
+شخصیت شما:
+- دوستانه، گرم و مفید هستید
+- به زبان فارسی صحبت می‌کنید
+- وقتی کسی به شما سلام می‌کند، پاسخ گرمی می‌دهید
+- می‌گویید که فعلاً صاحب اصلی مشغول است ولی شما می‌توانید کمک کنید
+- سعی می‌کنید به بهترین شکل به سوالات پاسخ دهید
+- اگر سوالی نیاز به صاحب اصلی داشت، مودبانه اطلاع می‌دهید
+- از ایموجی‌های مناسب استفاده می‌کنید (اما زیاد نه)
+- لحن شما مثل یک دوست خوب است`
+        },
+        ...history.slice(-10) // فقط 10 پیام آخر را ارسال کن
+      ],
+      temperature: 0.7,
+      max_tokens: 1000,
     });
-    console.log("✅ Groq Test Successful!");
-    console.log("📝 Response:", test.choices[0].message.content);
-    return true;
-  } catch (err) {
-    console.log("❌ Groq Test Failed!");
-    console.log("Error:", err.message);
-    console.log("Full Error:", err);
-    return false;
+
+    const aiResponse = completion.choices[0]?.message?.content || 
+                       "متأسفانه الان نمی‌تونم جواب بدم. لطفاً بعداً دوباره پیام بدید 🙏";
+
+    // ذخیره پاسخ AI در تاریخچه
+    history.push({ role: "assistant", content: aiResponse });
+
+    return aiResponse;
+  } catch (error) {
+    console.error("❌ خطای Groq:", error.message);
+    return "ببخشید، یه مشکلی پیش اومده. لطفاً دوباره تلاش کنید ⚠️";
   }
 }
 
-// ==================== راه‌اندازی Groq ====================
-const groq = new Groq({
-  apiKey: GROQ_API_KEY
-});
-
-// ==================== ذخیره تاریخچه ====================
-const userHistory = new Map();
-
-// ==================== سرور HTTP ====================
-http.createServer((req, res) => {
-  res.writeHead(200);
-  res.end("WhatsApp AI Bot Running");
-}).listen(PORT);
-
-console.log(`✅ HTTP Server running on port ${PORT}`);
-
-// ==================== تابع اصلی ====================
+// 🚀 شروع ربات
 async function startBot() {
-  try {
-    console.log("🔄 Initializing WhatsApp...");
+  const { state, saveCreds } = await useMultiFileAuthState("auth_info");
+
+  const sock = makeWASocket({
+    auth: state,
+    logger: P({ level: "silent" }),
+    printQRInTerminal: false,
+    browser: ["Ubuntu", "Chrome", "20.0.0"]
+  });
+
+  sock.ev.on("creds.update", saveCreds);
+
+  // 📡 مدیریت اتصال
+  sock.ev.on("connection.update", async ({ connection, lastDisconnect }) => {
+    if (connection === "connecting") {
+      console.log("🔄 در حال اتصال...");
+    }
+
+    if (connection === "open") {
+      console.log("✅ واتساپ با هوش مصنوعی وصل شد!");
+      console.log("🤖 ربات آماده پاسخگویی به جای شماست...");
+    }
+
+    if (connection === "close") {
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      console.log("❌ اتصال قطع شد");
+
+      if (statusCode !== DisconnectReason.loggedOut) {
+        setTimeout(() => startBot(), 5000);
+      } else {
+        console.log("⛔ لطفاً auth_info را پاک کرده و دوباره تلاش کنید");
+      }
+    }
+  });
+
+  // 📱 تولید کد تایید (فقط بار اول)
+  if (!state.creds.registered) {
+    console.log("📱 در حال تولید کد...");
+    await new Promise(resolve => setTimeout(resolve, 3000));
     
-    const { state, saveCreds } = await useMultiFileAuthState("auth_info");
+    try {
+      const code = await sock.requestPairingCode(PHONE_NUMBER.replace(/[^0-9]/g, ""));
+      console.log("===============================");
+      console.log("🔑 کد تایید:", code);
+      console.log("===============================");
+      console.log("📲 در واتساپ: تنظیمات > دستگاه‌های متصل > اتصال دستگاه");
+    } catch (err) {
+      console.error("❌ خطا:", err.message);
+    }
+  }
 
-    const sock = makeWASocket({
-      auth: state,
-      logger: P({ level: "silent" }),
-      printQRInTerminal: false
-    });
+  // 💬 پاسخ هوشمند به پیام‌ها
+  sock.ev.on("messages.upsert", async ({ messages }) => {
+    const msg = messages[0];
+    
+    // نادیده گرفتن پیام‌های خودمان و پیام‌های سیستمی
+    if (!msg.message || msg.key.fromMe) return;
+    
+    // نادیده گرفتن پیام‌های استاتوس
+    if (msg.key.remoteJid === "status@broadcast") return;
 
-    console.log("✅ Socket created");
+    const jid = msg.key.remoteJid;
+    const userId = jid.split("@")[0]; // شناسه کاربر
 
-    // ========== رویدادهای اتصال ==========
-    sock.ev.on("creds.update", saveCreds);
+    // استخراج متن پیام
+    const text = 
+      msg.message.conversation ||
+      msg.message.extendedTextMessage?.text ||
+      msg.message.imageMessage?.caption ||
+      msg.message.videoMessage?.caption ||
+      "";
 
-    sock.ev.on("connection.update", async ({ connection, lastDisconnect }) => {
-      if (connection === "connecting") {
-        console.log("🔄 Connecting to WhatsApp...");
-      }
+    if (!text) return; // اگر پیام متنی نبود
 
-      if (connection === "open") {
-        console.log("✅ WhatsApp Connected Successfully!");
-        console.log("🤖 Bot is ready to respond!");
-        
-        // تست Groq بعد از اتصال واتساپ
-        await testGroq();
-      }
+    // نمایش پیام در کنسول
+    console.log(`📩 پیام از ${userId}: ${text}`);
 
-      if (connection === "close") {
-        console.log("❌ Connection closed");
-        const shouldReconnect =
-          lastDisconnect?.error?.output?.statusCode !==
-          DisconnectReason.loggedOut;
+    try {
+      // نمایش تایپ کردن...
+      await sock.sendPresenceUpdate("composing", jid);
+      
+      // 🔮 دریافت پاسخ از AI
+      const aiResponse = await getAIResponse(text, userId);
+      
+      // ارسال پاسخ
+      await sock.sendMessage(jid, { text: aiResponse });
+      
+      // توقف تایپ کردن
+      await sock.sendPresenceUpdate("paused", jid);
+      
+      console.log(`🤖 پاسخ به ${userId}: ${aiResponse.substring(0, 50)}...`);
+      
+    } catch (error) {
+      console.error("❌ خطا در ارسال:", error.message);
+      
+      // ارسال پیام خطا
+      await sock.sendMessage(jid, {
+        text: "ببخشید، مشکلی پیش اومد. لطفاً دوباره تلاش کنید 🙏"
+      });
+    }
+  });
+}
 
-        if (shouldReconnect) {
-          console.log("🔄 Reconnecting in 5 seconds...");
-          setTimeout(startBot, 5000);
-        } else {
-          console.log("⚠️ Logged out. Please restart the bot.");
-        }
-      }
-    });
+// 🎯 اجرای ربات
+console.log("🤖 در حال راه‌اندازی ربات هوشمند...");
+startBot().catch(err => console.error("❌ خطای اصلی:", err));
 
-    // ========== دریافت کد Pairing ==========
-    if (!state.creds.registered) {
-      try {
-        console.log("🔄 Requesting pairing code...");
-        await new Promise(resolve => setTimeout(resolve, 5000));
-        const code = await sock.requestPairingCode(PHONE_NUMBER);
-        console.log("===============================");
-        console.log("📱 PAIRING CODE:");
+// 🧹 پاکسازی حافظه هر یک ساعت
+setInterval(() => {
+  conversationHistory.clear();
+  console.log("🧹 حافظه مکالمات پاکسازی شد");
+}, 3600000); // هر یک ساعت        console.log("📱 PAIRING CODE:");
         console.log(code);
         console.log("===============================");
         console.log("🔑 این کد را در واتساپ وارد کنید");
