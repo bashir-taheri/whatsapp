@@ -12,6 +12,30 @@ const PORT = process.env.PORT || 3000;
 const PHONE_NUMBER = "93745872028";
 const GROQ_API_KEY = "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";
 
+console.log("🚀 Starting WhatsApp Bot...");
+console.log("📱 Phone:", PHONE_NUMBER);
+console.log("🔑 API Key:", GROQ_API_KEY ? "✅ Set" : "❌ Not Set");
+
+// ==================== تست Groq ====================
+async function testGroq() {
+  console.log("🔄 Testing Groq connection...");
+  try {
+    const test = await groq.chat.completions.create({
+      messages: [{ role: "user", content: "سلام" }],
+      model: "mixtral-8x7b-32768",
+      max_tokens: 10,
+    });
+    console.log("✅ Groq Test Successful!");
+    console.log("📝 Response:", test.choices[0].message.content);
+    return true;
+  } catch (err) {
+    console.log("❌ Groq Test Failed!");
+    console.log("Error:", err.message);
+    console.log("Full Error:", err);
+    return false;
+  }
+}
+
 // ==================== راه‌اندازی Groq ====================
 const groq = new Groq({
   apiKey: GROQ_API_KEY
@@ -26,11 +50,13 @@ http.createServer((req, res) => {
   res.end("WhatsApp AI Bot Running");
 }).listen(PORT);
 
-console.log(`✅ Server running on port ${PORT}`);
+console.log(`✅ HTTP Server running on port ${PORT}`);
 
 // ==================== تابع اصلی ====================
 async function startBot() {
   try {
+    console.log("🔄 Initializing WhatsApp...");
+    
     const { state, saveCreds } = await useMultiFileAuthState("auth_info");
 
     const sock = makeWASocket({
@@ -38,6 +64,8 @@ async function startBot() {
       logger: P({ level: "silent" }),
       printQRInTerminal: false
     });
+
+    console.log("✅ Socket created");
 
     // ========== رویدادهای اتصال ==========
     sock.ev.on("creds.update", saveCreds);
@@ -50,6 +78,9 @@ async function startBot() {
       if (connection === "open") {
         console.log("✅ WhatsApp Connected Successfully!");
         console.log("🤖 Bot is ready to respond!");
+        
+        // تست Groq بعد از اتصال واتساپ
+        await testGroq();
       }
 
       if (connection === "close") {
@@ -70,6 +101,7 @@ async function startBot() {
     // ========== دریافت کد Pairing ==========
     if (!state.creds.registered) {
       try {
+        console.log("🔄 Requesting pairing code...");
         await new Promise(resolve => setTimeout(resolve, 5000));
         const code = await sock.requestPairingCode(PHONE_NUMBER);
         console.log("===============================");
@@ -77,9 +109,10 @@ async function startBot() {
         console.log(code);
         console.log("===============================");
         console.log("🔑 این کد را در واتساپ وارد کنید");
-        console.log("📱 WhatsApp > Linked Devices > Link a Device");
+        console.log("📱 WhatsApp > Settings > Linked Devices > Link a Device");
       } catch (err) {
         console.log("❌ Error getting pairing code:", err.message);
+        console.log("Full Error:", err);
       }
     }
 
@@ -87,10 +120,8 @@ async function startBot() {
     sock.ev.on("messages.upsert", async ({ messages }) => {
       const msg = messages[0];
       
-      // بررسی پیام
       if (!msg.message || msg.key.fromMe) return;
 
-      // استخراج متن
       const text =
         msg.message.conversation ||
         msg.message.extendedTextMessage?.text ||
@@ -99,7 +130,6 @@ async function startBot() {
 
       if (!text) return;
 
-      // فقط به پیام‌های متنی پاسخ بده
       if (!msg.message.conversation && !msg.message.extendedTextMessage) {
         return;
       }
@@ -107,7 +137,16 @@ async function startBot() {
       try {
         const userId = msg.key.remoteJid;
         
-        // مدیریت تاریخچه
+        console.log(`👤 ${userId}: ${text}`);
+
+        // ساده‌ترین پاسخ برای تست
+        if (text.toLowerCase() === "سلام" || text.toLowerCase() === "test") {
+          await sock.sendMessage(msg.key.remoteJid, {
+            text: "سلام! ربات فعال است. منتظر پاسخ هوشمند باشید... 🚀"
+          });
+        }
+
+        // پاسخ هوشمند با Groq
         if (!userHistory.has(userId)) {
           userHistory.set(userId, []);
         }
@@ -115,23 +154,20 @@ async function startBot() {
         const history = userHistory.get(userId);
         history.push({ role: "user", content: text });
         
-        // محدود کردن تاریخچه
         if (history.length > 10) {
           history.splice(0, 2);
         }
 
-        // ساخت پیام برای Groq
         const messagesForGroq = [
           {
             role: "system",
-            content: "شما یک دستیار هوشمند، مفید و دوستانه هستید که به زبان فارسی پاسخ می‌دهید. پاسخ‌های شما مختصر، دقیق و مفید هستند."
+            content: "شما یک دستیار هوشمند، مفید و دوستانه هستید که به زبان فارسی پاسخ می‌دهید."
           },
           ...history
         ];
 
-        console.log(`👤 ${userId}: ${text}`);
+        console.log("🔄 Sending to Groq...");
 
-        // ارسال به Groq
         const chatCompletion = await groq.chat.completions.create({
           messages: messagesForGroq,
           model: "mixtral-8x7b-32768",
@@ -141,10 +177,8 @@ async function startBot() {
 
         const response = chatCompletion.choices[0]?.message?.content || "متاسفم، پاسخی دریافت نشد.";
 
-        // ذخیره پاسخ
         history.push({ role: "assistant", content: response });
 
-        // ارسال پاسخ
         await sock.sendMessage(msg.key.remoteJid, {
           text: response
         });
@@ -154,23 +188,12 @@ async function startBot() {
 
       } catch (err) {
         console.log("❌ Error:", err.message);
+        console.log("Full Error:", err);
         
-        // ارسال پیام خطا
+        // ارسال پاسخ ساده در صورت خطا
         try {
-          let errorMsg = "⚠️ متاسفم، خطایی رخ داد: ";
-          
-          if (err.message.includes("API key")) {
-            errorMsg += "کلید API معتبر نیست.";
-          } else if (err.message.includes("rate limit")) {
-            errorMsg += "محدودیت درخواست. چند دقیقه صبر کنید.";
-          } else if (err.message.includes("network") || err.message.includes("fetch")) {
-            errorMsg += "مشکل در اتصال به اینترنت.";
-          } else {
-            errorMsg += "لطفاً دوباره تلاش کنید.";
-          }
-          
           await sock.sendMessage(msg.key.remoteJid, {
-            text: errorMsg
+            text: "⚠️ متاسفم، خطایی رخ داد. لطفاً دوباره تلاش کنید."
           });
         } catch (sendErr) {
           console.log("Error sending error message:", sendErr.message);
@@ -180,18 +203,22 @@ async function startBot() {
 
   } catch (err) {
     console.log("❌ Fatal Error:", err.message);
+    console.log("Stack:", err.stack);
     setTimeout(startBot, 5000);
   }
 }
 
 // ==================== اجرا ====================
+console.log("🔄 Starting bot...");
 startBot();
 
-// مدیریت خروج
+// مدیریت خطاها
 process.on('uncaughtException', (err) => {
   console.log('❌ Uncaught Exception:', err.message);
+  console.log('Stack:', err.stack);
 });
 
 process.on('unhandledRejection', (err) => {
   console.log('❌ Unhandled Rejection:', err.message);
+  console.log('Stack:', err.stack);
 });
